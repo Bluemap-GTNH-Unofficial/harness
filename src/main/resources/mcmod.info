@@ -1,0 +1,21 @@
+{
+	"modListVersion": 2,
+	"modList": [{
+		"modid": "${modId}",
+		"name": "${modName}",
+		"description": "Server-side test harness for the BlueMap GTNH port: the /bmh command for scripted world setup and dumps.",
+		"version": "${modVersion}",
+		"mcversion": "${minecraftVersion}",
+		"url": "",
+		"updateUrl": "",
+		"authorList": ["FYWinds"],
+		"credits": "",
+		"logoFile": "",
+		"screenshots": [],
+		"parent": "",
+		"requiredMods": ["forgelin"],
+		"dependencies": ["forgelin"],
+		"dependants": [],
+		"useDependencyInformation": false
+	}]
+}
