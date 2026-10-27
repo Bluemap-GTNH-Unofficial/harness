@@ -15,7 +15,7 @@ import java.util.concurrent.TimeoutException
  */
 object BmhCommand : CommandBase() {
     private const val USAGE = "/bmh <ping|registry|set|fill|pregen|hold|release|drop-ticks|mte|mtes|gt-ores|pipe|" +
-        "multiblock|zoo|place-list|dump|flush> ..."
+        "multiblock|zoo|place-list|te-nbt|use|dump|flush> ..."
     private const val TIMEOUT_MINUTES = 30L
 
     override fun getCommandName(): String = "bmh"
@@ -85,6 +85,21 @@ object BmhCommand : CommandBase() {
             val dim = a.int("dim")
             val cx1 = a.int("cx1"); val cz1 = a.int("cz1"); val cx2 = a.int("cx2"); val cz2 = a.int("cz2")
             a.done { WorldOps.dropTicksCommand(dim, cx1, cz1, cx2, cz2) }
+        }
+        "te-nbt" -> {
+            val dim = a.int("dim")
+            val x = a.int("x"); val y = a.int("y"); val z = a.int("z")
+            val file = a.word("file")
+            a.done { Interact.teNbt(dim, x, y, z, file) }
+        }
+        "use" -> {
+            val dim = a.int("dim")
+            val x = a.int("x"); val y = a.int("y"); val z = a.int("z")
+            val side = WorldOps.parseFacing(a.word("side"))
+            val item = a.word("modid:item"); val meta = a.int("meta")
+            val yaw = a.optionalWord()?.let { it.toFloatOrNull() ?: throw BmhException("<yaw> must be a number, got $it") }
+            val count = a.optionalInt("count") ?: 1
+            a.done { Interact.use(WorldOps.world(dim), x, y, z, side, item, meta, yaw, count) }
         }
         "mte" -> {
             val dim = a.int("dim")

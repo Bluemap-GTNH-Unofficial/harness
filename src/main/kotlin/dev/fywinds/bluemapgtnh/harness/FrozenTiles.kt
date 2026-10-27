@@ -86,6 +86,9 @@ object FrozenTiles {
         if (data.remove(x, y, z)) data.markDirty()
     }
 
+    fun isFrozen(world: World, x: Int, y: Int, z: Int): Boolean =
+        data(world).positions[FrozenTileData.chunkKey(x shr 4, z shr 4)]?.contains(FrozenTileData.pack(x, y, z)) == true
+
     /** Removes the tile entities frozen by this command from the ticking lists. Called after every command. */
     fun commitPending() {
         for ((world, tiles) in pending) unhook(world, tiles)

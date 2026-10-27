@@ -451,9 +451,10 @@ object WorldOps {
 
     /**
      * Places the entries of a JSON list on a [Grid], in list order. Entries are `{"name": "modid:name", "meta": n}`
-     * (placed like zoo variants, any meta 0..65535 except 32767) or `{"mte": mID, "facing": f}` (placed like `bmh mte`;
+     * (placed like zoo variants, any meta 0..65535 except 32767), `{"mte": mID, "facing": f}` (placed like `bmh mte`;
      * facing is a ForgeDirection ordinal or name, or a list of them of which the first valid one is used; default
-     * NORTH; ignored for pipes).
+     * NORTH; ignored for pipes) or `{"use": u | [u, ...]}` (right-clicks like `bmh use`, see [useAt]). Any entry may
+     * add `"teNbt": <JSON patch object | SNBT string>`, applied to the tile entity in the cell afterwards.
      */
     fun placeList(dim: Int, x0: Int, y: Int, z0: Int, file: String, out: String): JsonObject {
         val world = world(dim)
@@ -487,28 +488,65 @@ object WorldOps {
     }
 
     private fun placeEntry(world: WorldServer, x: Int, y: Int, z: Int, entry: JsonObject): JsonObject {
-        val mte = entry.get("mte")
-        if (mte != null) {
-            val mId = mte.asInt
-            val facings = when (val f = entry.get("facing")) {
-                null -> listOf(GtCompat.NORTH)
-                is JsonArray -> f.map { parseFacing(it.asString) }
-                else -> listOf(parseFacing(f.asString))
+        val record = when {
+            entry.has("mte") -> {
+                val mId = entry.get("mte").asInt
+                val facings = when (val f = entry.get("facing")) {
+                    null -> listOf(GtCompat.NORTH)
+                    is JsonArray -> f.map { parseFacing(it.asString) }
+                    else -> listOf(parseFacing(f.asString))
+                }
+                val result = GtCompat.placeMte(world, x, y, z, mId, facings)
+                cell(world, x, y, z).apply {
+                    addProperty("mte", mId)
+                    addProperty("metaName", result.metaName)
+                    result.facing?.let { addProperty("facing", it) } ?: add("facing", JsonNull.INSTANCE)
+                }
             }
-            val result = GtCompat.placeMte(world, x, y, z, mId, facings)
-            val block = world.getBlock(x, y, z)
-            return obj(
-                "x" to x, "y" to y, "z" to z, "name" to blockName(block), "id" to Block.getIdFromBlock(block),
-                "meta" to world.getBlockMetadata(x, y, z), "mte" to mId, "metaName" to result.metaName,
-                "facing" to result.facing,
-            )
+            entry.has("use") -> {
+                val uses = entry.get("use").let { if (it.isJsonArray) it.asJsonArray.toList() else listOf(it) }
+                val used = JsonArray()
+                for (use in uses) used.add(JsonPrimitive(useAt(world, x, y, z, use.asJsonObject)))
+                if (world.getBlock(x, y, z) === Blocks.air) throw BmhException("nothing was placed in the cell")
+                cell(world, x, y, z).apply { add("used", used) }
+            }
+            else -> {
+                val name = entry.get("name")?.asString ?: throw BmhException("entry needs \"name\", \"mte\" or \"use\"")
+                val meta = entry.get("meta")?.asInt ?: 0
+                checkMeta(meta)
+                val block = block(name)
+                val actual = placeVariant(world, x, y, z, block, meta)
+                obj("x" to x, "y" to y, "z" to z, "name" to name, "id" to Block.getIdFromBlock(block), "meta" to actual)
+            }
         }
-        val name = entry.get("name")?.asString ?: throw BmhException("entry needs \"name\" or \"mte\"")
-        val meta = entry.get("meta")?.asInt ?: 0
-        checkMeta(meta)
-        val block = block(name)
-        val actual = placeVariant(world, x, y, z, block, meta)
-        return obj("x" to x, "y" to y, "z" to z, "name" to name, "id" to Block.getIdFromBlock(block), "meta" to actual)
+        entry.get("teNbt")?.let { patch ->
+            record.add("te", NbtJson.toJson(Interact.applyTeNbt(world, x, y, z, patch)))
+        }
+        return record
+    }
+
+    private fun cell(world: WorldServer, x: Int, y: Int, z: Int): JsonObject {
+        val block = world.getBlock(x, y, z)
+        return obj(
+            "x" to x, "y" to y, "z" to z, "name" to blockName(block), "id" to Block.getIdFromBlock(block),
+            "meta" to world.getBlockMetadata(x, y, z),
+        )
+    }
+
+    /**
+     * One `use` of a place-list entry in the cell x/y/z: `{"item": "modid:item", "meta": 0, "count": 1,
+     * "side": "UP", "yaw": <default: looking at the face>, "at": [dx, dy, dz]}`; the clicked block is the cell plus
+     * `at` (default `[0, -1, 0]`: the floor under the cell, so side UP places into the cell).
+     */
+    private fun useAt(world: WorldServer, x: Int, y: Int, z: Int, use: JsonObject): Boolean {
+        val at = use.get("at")?.asJsonArray?.map { it.asInt } ?: listOf(0, -1, 0)
+        if (at.size != 3) throw BmhException("\"at\" must be [dx, dy, dz]")
+        val item = use.get("item")?.asString ?: throw BmhException("use needs \"item\"")
+        val result = Interact.use(
+            world, x + at[0], y + at[1], z + at[2], parseFacing(use.get("side")?.asString ?: "UP"), item,
+            use.get("meta")?.asInt ?: 0, use.get("yaw")?.asFloat, use.get("count")?.asInt ?: 1,
+        )
+        return result.get("used").asBoolean
     }
 
     /** ForgeDirection ordinal 0..5 or name (DOWN, UP, NORTH, SOUTH, WEST, EAST; case-insensitive). */

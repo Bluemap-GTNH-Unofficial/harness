@@ -45,17 +45,19 @@ and queued for unloading (thus saving) when the command ends.
 
 | Command | Reply | Notes |
 |---|---|---|
-| `bmh ping` | `{"version":"0.2.0"}` | |
+| `bmh ping` | `{"version":"0.3.0"}` | |
 | `bmh registry <file>` | `{"file","blocks","biomes","dimensions"}` | File: `{"blocks":[{"id","name"}],"biomes":[{"id","name","temperature","rainfall","color","waterColorMultiplier"}],"dimensions":[{"id","folder","providerClass","name"}]}`. Dimensions are `DimensionManager.getStaticDimensionIDs()`; unloaded ones get a fresh provider instance for class/name/folder. |
 | `bmh set <dim> <x> <y> <z> <name> <meta>` | `{}` | `World.setBlock` with flag 2 (no neighbour updates); drops suppressed (`restoringBlockSnapshots`, replaced inventories emptied). A resulting tile entity is checked to be saveable and frozen (see below); if not, the block is removed and the reply is `ERR`. Also places GT ores (see "GregTech"). |
 | `bmh fill <dim> <x1> <y1> <z1> <x2> <y2> <z2> <name> <meta>` | `{"count"}` | Same placement as `set` (tile entities frozen); volume ≤ 1,000,000. `count` = blocks actually changed (`setBlock` returned true). |
-| `bmh pregen <dim> <cx1> <cz1> <cx2> <cz2>` | `{"chunks","ms"}` | Inclusive chunk rectangle, ≤ 4096 chunks. Loads it with a one-chunk margin so vanilla population runs, then populates any chunk still unpopulated. |
+| `bmh pregen <dim> <cx1> <cz1> <cx2> <cz2>` | `{"chunks","ms"}` | Inclusive chunk rectangle, ≤ 4096 chunks. Loads it with a one-chunk margin so vanilla population runs, then populates any chunk still unpopulated. The generated chunks are only queued for unloading, and vanilla unloads at most 100 per tick; back-to-back large pregens snowball (observed: 16 × 4096 chunks left ~66k chunks loaded, ~10 GB heap, 0.5 TPS). Between large calls, wait until the backlog drains (≈ chunks / 100 ticks) or restart the server. |
 | `bmh hold <dim> <cx1> <cz1> <cx2> <cz2>` | `{"chunks","held"}` | Loads (generates) the inclusive chunk rectangle (≤ 4096) and keeps it loaded until `release`, so tile entities there tick and settle and a later `dump` reads exactly what `flush` saved. Without it, a dump that has to load chunks queues them for unloading afterwards (vanilla unloads ≤ 100 per tick), and tile entities ticking meanwhile can change what gets saved. `held` = total held chunks. |
 | `bmh release` | `{"chunks"}` | Queues every held chunk for unloading. |
 | `bmh drop-ticks <dim> <cx1> <cz1> <cx2> <cz2>` | `{"chunks","ticks"}` | Removes the scheduled block updates of the inclusive chunk rectangle (≤ 4096), so liquids stop flowing and a held area no longer changes between `flush`, `dump` and the final save. |
 | `bmh mte <dim> <x> <y> <z> <mID> <facing>` | `{"name"}` | Places `gt.blockmachines` with MetaTileEntity `mID` (e.g. 1000 = EBF controller) like a player would (see "GregTech"); `ERR` if the facing is invalid for that machine. `name` = metaName. |
 | `bmh mtes <file>` | `{"file","count","types":{<type>:n}}` | Every `GregTechAPI.METATILEENTITIES` entry. File: see "GregTech". |
 | `bmh gt-ores <file>` | `{"file","count","blocks"}` | Every GT ore block/meta GregTech generates. File: see "GregTech". |
+| `bmh te-nbt <dim> <x> <y> <z> <file>` | the tile entity's `writeToNBT` as JSON | Merges `bmh-out/<file>` (JSON patch, or SNBT if the name ends in `.snbt`) into the tile entity. See "Tile entity NBT". |
+| `bmh use <dim> <x> <y> <z> <side> <modid:item> <meta> [yaw] [count]` | `{"used","yaw","positions","placed"}` | Right-click with an item as a player. See "Use". |
 | `bmh pipe <dim> <x1> <y1> <z1> <x2> <y2> <z2> <mID> [color]` | `{"name","blocks","placed","connections"}` | Pipe/cable/frame MTE on an axis-aligned line (≤ 256 blocks), consecutive blocks connected. See "GregTech". |
 | `bmh multiblock <dim> <x> <y> <z> [tier] [creative\|survival\|check]` | `{"mode","formed"[,"errors"]}` + survival: `{"placed","passes","last"}` | Builds (or only checks) the multiblock of the controller at x/y/z. tier (default 1) = trigger stack size. See "GregTech". |
 | `bmh zoo <dim> <x> <y> <z> <modid\|all> <file>` | `{"file","placed","failed"}` | Grid with 2-block spacing on a stone slab at y-1, ordered by block id. File: `{"placed":[{"x","y","z","name","id","meta"}],"failed":[{"name","meta","reason"}]}`. See "Zoo" below. |
@@ -112,11 +114,62 @@ layout, population, stone floor at y-1 and dropped scheduled updates), entry *i*
   entity, meta restored, probes).
 - `{"mte", "facing"}`: placed like `bmh mte`; `facing` is an ordinal/name or a list of them, the first one the
   machine accepts is used (default `NORTH`; ignored for pipes, which `bmh pipe` connects).
+- `{"use": u}` or `{"use": [u, ...]}`, `u = {"item": "modid:item", "meta": 0, "count": 1, "side": "UP", "yaw": <default>,
+  "at": [dx, dy, dz]}`: right-clicks like `bmh use`, in order; the clicked block is the cell plus `at` (default
+  `[0, -1, 0]`, the floor, so side `UP` places into the cell). Example (cable with an export bus on its north side):
+  `{"use": [{"item": "appliedenergistics2:item.ItemMultiPart", "meta": 16},
+  {"item": "appliedenergistics2:item.ItemMultiPart", "meta": 260, "side": "NORTH", "at": [0, 0, 0]}]}`. Resulting
+  tile entities tick (not frozen). The manifest record adds `"used": [bool, ...]`.
+- Any entry may add `"teNbt": <patch>` (JSON object or SNBT string, see "Tile entity NBT"), applied to the tile entity
+  in the cell after placing; the manifest record then adds `"te"` (its NBT afterwards).
 
 Manifest `<out>`:
 `{"placed":[{"index","x","y","z","name","id","meta"[,"mte","metaName","facing"]}],"failed":[{"index",<entry fields>,"reason"}]}`;
 `facing` is the ordinal actually set (null for pipes). `box` in the reply is `[x1,y1,z1,x2,y2,z2]` = floor plus a
 one-block margin up to y+3, ready for `bmh dump`.
+
+### Tile entity NBT
+
+`bmh te-nbt <dim> <x> <y> <z> <file>` reads `bmh-out/<file>`, merges it into the tile entity's `writeToNBT` output
+(`x`, `y`, `z`, `id` are always kept), calls `readFromNBT`, `markDirty`, marks the block for update, checks that the
+tile entity is still saveable (else the block is removed and the reply is `ERR`) and keeps a frozen tile entity frozen
+(D14). Reply: the resulting `writeToNBT` as JSON (lossy, as in `dump`).
+
+- **SNBT** (file name ends in `.snbt`): 1.7.10 `JsonToNBT` syntax, e.g. `{facing:4b,Items:[{Slot:0b,id:264s,Count:5b,Damage:0s}]}`
+  (`b` byte, `s` short, none int, `L` long, `f` float, `d` double; compounds merge recursively, other tags replace).
+- **JSON** (any other name): an object merged key by key. Value typing, first match wins:
+  1. typed wrapper: `{"@byte": 1}`, `{"@short": 2}`, `{"@int": 3}`, `{"@long": 4}` (number or decimal string),
+     `{"@float": 1.5}`, `{"@double": 1.5}`, `{"@string": "x"}`, `{"@bytes": [1, 2]}`, `{"@ints": [1, 2]}`,
+     `{"@list": [...]}`;
+  2. the type of the tag already at that key (numbers/booleans converted to it; arrays become a byte/int array, or a
+     list whose elements take the existing list's element type);
+  3. defaults: integral number → int (long if out of int range), other number → double, boolean → byte, string →
+     string, array → list, object → compound.
+  Objects merge into an existing compound recursively; `null` removes the key; lists and arrays are replaced whole.
+  Example: `{"facing": 3, "Items": [{"Slot": {"@byte": 0}, "id": {"@short": 264}, "Count": {"@byte": 5}, "Damage": {"@short": 0}}]}`.
+
+### Use
+
+`bmh use <dim> <x> <y> <z> <side> <modid:item> <meta> [yaw] [count]` right-clicks face `side` (ordinal or name) of
+block x/y/z the way the server handles a player's click: the fake player `[Minecraft]` stands 2 blocks out from that
+face (feet level with the block for horizontal faces), at `yaw` (Minecraft degrees: 0 = looking south/+z, 90 = west,
+180 = north, 270 = east; default: looking at the face) and pitch 0, holding `count` (default 1) × `item:meta` in slot
+0; then `Item.onItemUseFirst` and, if that did not handle it, `ItemStack.tryPlaceItemIntoWorld` (→ `Item.onItemUse`,
+with Forge's block snapshots and place event), hit point at the centre of the face. The clicked block's
+`onBlockActivated` is not called (as when sneaking). Placed tile entities are not frozen (they tick; mods such as AE2
+and EnderIO finish their NBT on the first ticks) and must be saveable.
+
+Reply: `{"used": bool, "yaw", "positions": [<clicked>, <adjacent>], "placed": <the adjacent record if it changed,
+else the clicked one if it changed, else null>}`; each record is `{"x","y","z","name","id","meta","te","role",
+"changed"}` with `te` the tile entity NBT as JSON. Verified on GTNH 2.9.0-RC-2 (block facing = towards the player):
+
+| Item | Example | Result |
+|---|---|---|
+| AE2 fluix glass cable | `use 0 102 4 102 UP appliedenergistics2:item.ItemMultiPart 16` | `tile.BlockCableBus`, `def:6` = cable |
+| AE2 import bus on the cable's north side | `use 0 102 5 102 NORTH appliedenergistics2:item.ItemMultiPart 240` | clicked block changes, `def:2` = bus |
+| EnderIO item conduit | `use 0 102 4 106 UP EnderIO:itemItemConduit 0` (then x 103, 104) | `blockConduitBundle`; `connections` become two-sided after a tick |
+| Iron chest facing east | `use 0 106 4 102 UP IronChest:BlockIronChest 0 90` | `facing: 5` |
+| BiblioCraft bookcase facing south | `use 0 108 4 102 UP BiblioCraft:Bibliotheca 0 180` | `bookcaseAngle: 3` (yaw 0/90/180/270 → 1/2/3/0) |
 
 ### GregTech
 
