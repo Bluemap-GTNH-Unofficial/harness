@@ -3,6 +3,8 @@ package dev.fywinds.bluemapgtnh.harness
 import com.google.gson.JsonArray
 import com.google.gson.JsonNull
 import com.google.gson.JsonObject
+import com.google.gson.JsonParser
+import com.google.gson.JsonPrimitive
 import cpw.mods.fml.common.registry.GameData
 import net.minecraft.block.Block
 import net.minecraft.init.Blocks
@@ -67,19 +69,25 @@ object WorldOps {
     }
 
     /** Resolves `<server-root>/bmh-out/<relative>`, rejecting absolute paths and `..`. */
-    fun outFile(relative: String): File {
+    private fun harnessFile(relative: String): File {
         val normalized = relative.replace('\\', '/')
         if (normalized.isEmpty() || normalized.startsWith("/") || File(relative).isAbsolute ||
             normalized.split('/').any { it == ".." || it.isEmpty() }
         ) {
-            throw BmhException("invalid output path $relative (relative, no '..')")
+            throw BmhException("invalid path $relative (relative to $OUT_DIR, no '..')")
         }
         val root = MinecraftServer.getServer().getFile(OUT_DIR).canonicalFile
         val file = File(root, normalized).canonicalFile
-        if (!file.toPath().startsWith(root.toPath())) throw BmhException("invalid output path $relative")
-        file.parentFile.mkdirs()
+        if (!file.toPath().startsWith(root.toPath())) throw BmhException("invalid path $relative")
         return file
     }
+
+    /** Output file `<server-root>/bmh-out/<relative>`; parent directories are created. */
+    fun outFile(relative: String): File = harnessFile(relative).also { it.parentFile.mkdirs() }
+
+    /** Existing input file `<server-root>/bmh-out/<relative>`. */
+    fun inFile(relative: String): File =
+        harnessFile(relative).also { if (!it.isFile) throw BmhException("input file $OUT_DIR/$relative does not exist") }
 
     /** Chunks loaded by the current command that were not loaded before; unloaded again by [releaseChunks]. */
     private val loadedByCommand = LinkedHashMap<WorldServer, LinkedHashSet<Long>>()
@@ -106,6 +114,63 @@ object WorldOps {
         loadedByCommand.clear()
     }
 
+    /** Chunks kept loaded by `bmh hold` until `bmh release`. */
+    private val held = LinkedHashMap<WorldServer, LinkedHashSet<Long>>()
+
+    /**
+     * Loads (generating if needed) the inclusive chunk rectangle and keeps it loaded, so its tile entities tick and the
+     * world settles before a flush, and a dump reads exactly what the flush saved (a dump that has to load chunks
+     * releases them afterwards, at most 100 per tick, so ticking tile entities can change them before they are saved).
+     */
+    fun hold(dim: Int, cx1: Int, cz1: Int, cx2: Int, cz2: Int): JsonObject {
+        val world = world(dim)
+        val (xa, xb) = min(cx1, cx2) to max(cx1, cx2)
+        val (za, zb) = min(cz1, cz2) to max(cz1, cz2)
+        val count = (xb - xa + 1).toLong() * (zb - za + 1)
+        if (count > PREGEN_CAP) throw BmhException("hold of $count chunks exceeds $PREGEN_CAP")
+        val keys = held.getOrPut(world) { LinkedHashSet() }
+        for (cx in xa..xb) for (cz in za..zb) {
+            ensureChunkAt(world, cx, cz) // also takes it off the provider's unload queue
+            keys += (cx.toLong() shl 32) or (cz.toLong() and 0xffffffffL)
+        }
+        loadedByCommand[world]?.removeAll(keys)
+        return obj("chunks" to count, "held" to held.values.sumOf { it.size })
+    }
+
+    /** Queues every held chunk for unloading. */
+    fun release(): JsonObject {
+        var count = 0
+        for ((world, chunks) in held) {
+            for (key in chunks) world.theChunkProviderServer.unloadChunksIfNotNearSpawn((key shr 32).toInt(), key.toInt())
+            count += chunks.size
+        }
+        held.clear()
+        return obj("chunks" to count)
+    }
+
+    /** Removes the scheduled block updates (pending ticks) of the chunks in the rectangle; returns how many. */
+    private fun dropTicks(world: WorldServer, xa: Int, za: Int, xb: Int, zb: Int): Int {
+        var count = 0
+        for (cx in xa..xb) for (cz in za..zb) {
+            count += world.getPendingBlockUpdates(ensureChunkAt(world, cx, cz), true)?.size ?: 0
+        }
+        return count
+    }
+
+    /**
+     * Drops the scheduled block updates of the inclusive chunk rectangle (≤ 4096 chunks): liquids stop flowing,
+     * falling blocks stay, so a world whose dumped chunks are held does not change between `flush`, `dump` and the
+     * final save (e.g. lava still flowing in generated caves).
+     */
+    fun dropTicksCommand(dim: Int, cx1: Int, cz1: Int, cx2: Int, cz2: Int): JsonObject {
+        val world = world(dim)
+        val (xa, xb) = min(cx1, cx2) to max(cx1, cx2)
+        val (za, zb) = min(cz1, cz2) to max(cz1, cz2)
+        val count = (xb - xa + 1).toLong() * (zb - za + 1)
+        if (count > PREGEN_CAP) throw BmhException("drop-ticks of $count chunks exceeds $PREGEN_CAP")
+        return obj("chunks" to count, "ticks" to dropTicks(world, xa, za, xb, zb))
+    }
+
     /**
      * Places a block without neighbour notifications and without item drops from the replaced block.
      * With EndlessIDs installed `World.setBlock` stores the full 16-bit meta.
@@ -127,6 +192,17 @@ object WorldOps {
             FrozenTiles.unfreeze(world, x, y, z)
             return changed
         }
+        checkSaveable(world, x, y, z)
+        FrozenTiles.freeze(world, x, y, z, tile)
+        return changed
+    }
+
+    /**
+     * Throws a [BmhException] (after removing the block) if the tile entity at x/y/z fails `writeToNBT` or binary NBT
+     * serialization. Such a tile entity would silently keep its whole chunk from being written.
+     */
+    fun checkSaveable(world: WorldServer, x: Int, y: Int, z: Int) {
+        val tile = world.getTileEntity(x, y, z) ?: return
         try {
             val tag = NBTTagCompound()
             tile.writeToNBT(tag)
@@ -135,8 +211,6 @@ object WorldOps {
             removeBroken(world, x, y, z)
             throw BmhException("tile entity ${tile.javaClass.name} cannot be saved: $t")
         }
-        FrozenTiles.freeze(world, x, y, z, tile)
-        return changed
     }
 
     /** Forge: Block.dropBlockAsItem / spawnAsEntity do nothing while `restoringBlockSnapshots` is set. */
@@ -151,14 +225,14 @@ object WorldOps {
     }
 
     /** Best-effort removal of a block whose tile entity is broken, so a later save never touches it. */
-    private fun removeBroken(world: WorldServer, x: Int, y: Int, z: Int) {
+    fun removeBroken(world: WorldServer, x: Int, y: Int, z: Int) {
         runCatching { world.removeTileEntity(x, y, z) }
         runCatching { withoutDrops(world) { world.setBlock(x, y, z, Blocks.air, 0, SET_FLAGS) } }
         runCatching { world.getChunkFromBlockCoords(x, z).removeTileEntity(x and 15, y, z and 15) }
         FrozenTiles.unfreeze(world, x, y, z)
     }
 
-    private fun obj(vararg pairs: Pair<String, Any?>): JsonObject = JsonObject().also { o ->
+    fun obj(vararg pairs: Pair<String, Any?>): JsonObject = JsonObject().also { o ->
         for ((k, v) in pairs) when (v) {
             null -> o.add(k, JsonNull.INSTANCE)
             is Number -> o.addProperty(k, v)
@@ -286,8 +360,6 @@ object WorldOps {
 
     fun zoo(dim: Int, x0: Int, y: Int, z0: Int, modid: String, file: String): JsonObject {
         val world = world(dim)
-        checkY(world, y)
-        checkY(world, y - 1)
         val prefix = "$modid:"
         val blocks = GameData.getBlockRegistry().typeSafeIterable()
             .filter { it !== Blocks.air }
@@ -300,46 +372,152 @@ object WorldOps {
             val metas = runCatching { variants(b) }.getOrElse { listOf(0) }
             metas.map { Triple(b, name, it) }
         }
-        val side = ceil(sqrt(entries.size.toDouble())).toInt()
-        val rows = (entries.size + side - 1) / side
-
-        val xMax = x0 + 2 * (side - 1)
-        val zMax = z0 + 2 * (rows - 1)
-        // Populate first, so world decoration (trees, villages, ores) cannot later overwrite the zoo. Population of
-        // chunk (cx, cz) decorates blocks offset by +8, so the chunks one step towards -x/-z are populated too.
-        populate(world, (x0 shr 4) - 1, (z0 shr 4) - 1, xMax shr 4, zMax shr 4)
-
-        // Continuous stone slab under the whole grid.
-        val stone = Blocks.stone
-        for (x in x0..xMax) for (z in z0..zMax) place(world, x, y - 1, z, stone, 0)
-
+        val grid = Grid.prepare(world, x0, y, z0, entries.size)
         val placed = JsonArray()
         val failed = JsonArray()
         entries.forEachIndexed { index, (b, name, meta) ->
-            val x = x0 + 2 * (index % side)
-            val z = z0 + 2 * (index / side)
+            val x = grid.x(index)
+            val z = grid.z(index)
             try {
-                place(world, x, y, z, b, meta)
-                if (world.getBlock(x, y, z) !== b) throw BmhException("block did not stick")
-                // Some blocks re-orient themselves at random or by surroundings in onBlockAdded; restore the variant.
-                if (world.getBlockMetadata(x, y, z) != meta) world.setBlockMetadataWithNotify(x, y, z, meta, SET_FLAGS)
-                probe(world, x, y, z, b, meta)
-                val actual = world.getBlockMetadata(x, y, z)
+                val actual = placeVariant(world, x, y, z, b, meta)
                 placed.add(obj("x" to x, "y" to y, "z" to z, "name" to name, "id" to Block.getIdFromBlock(b), "meta" to actual))
             } catch (t: Throwable) {
-                val reason = if (t is BmhException) t.message ?: "failed" else t.toString()
+                val reason = failure(t)
                 failed.add(obj("name" to name, "meta" to meta, "reason" to reason))
                 BmhMod.log.warn("zoo: failed to place {}:{} at {},{},{}: {}", name, meta, x, y, z, reason)
                 removeBroken(world, x, y, z)
             }
         }
-        // Drop scheduled block updates queued by onBlockAdded (flowing liquids, falling blocks, fire, ...), so the
-        // scene stays as placed. Random ticks only run in chunks near players.
-        for (cx in ((x0 - 1) shr 4)..((xMax + 1) shr 4)) for (cz in ((z0 - 1) shr 4)..((zMax + 1) shr 4)) {
-            world.getPendingBlockUpdates(ensureChunkAt(world, cx, cz), true)
-        }
+        grid.dropScheduledUpdates()
         outFile(file).writeText(obj("placed" to placed, "failed" to failed).toString(), StandardCharsets.UTF_8)
         return obj("file" to file, "placed" to placed.size(), "failed" to failed.size())
+    }
+
+    private fun failure(t: Throwable): String = if (t is BmhException) t.message ?: "failed" else t.toString()
+
+    /**
+     * Places a block variant as the zoo does: with a frozen tile entity, checking that it sticks, restoring the
+     * requested meta if onBlockAdded changed it, and probing common Block methods. Returns the meta in the world.
+     */
+    private fun placeVariant(world: WorldServer, x: Int, y: Int, z: Int, block: Block, meta: Int): Int {
+        place(world, x, y, z, block, meta)
+        if (world.getBlock(x, y, z) !== block) throw BmhException("block did not stick")
+        // Some blocks re-orient themselves at random or by surroundings in onBlockAdded; restore the variant.
+        if (world.getBlockMetadata(x, y, z) != meta) world.setBlockMetadataWithNotify(x, y, z, meta, SET_FLAGS)
+        probe(world, x, y, z, block, meta)
+        return world.getBlockMetadata(x, y, z)
+    }
+
+    /**
+     * Square grid with 2-block spacing at height [y] starting at x0/z0, entry i at (x0 + 2 (i % side), z0 + 2 (i / side)).
+     * [prepare] populates the chunks first, so world decoration (trees, villages, ores) cannot later overwrite the grid
+     * (population of chunk (cx, cz) decorates blocks offset by +8, so the chunks one step towards -x/-z are populated
+     * too), and lays a continuous stone floor at y-1.
+     */
+    class Grid private constructor(private val world: WorldServer, val x0: Int, val y: Int, val z0: Int, count: Int) {
+        private val side = max(1, ceil(sqrt(count.toDouble())).toInt())
+        private val rows = max(1, (count + side - 1) / side)
+        private val xMax = x0 + 2 * (side - 1)
+        private val zMax = z0 + 2 * (rows - 1)
+
+        fun x(index: Int) = x0 + 2 * (index % side)
+
+        fun z(index: Int) = z0 + 2 * (index / side)
+
+        /** Floor plus a one-block margin, up to 3 blocks above the grid: `[x1, y1, z1, x2, y2, z2]`. */
+        fun box(): JsonArray = JsonArray().also { a ->
+            for (v in intArrayOf(x0 - 1, y - 1, z0 - 1, xMax + 1, y + 3, zMax + 1)) a.add(JsonPrimitive(v))
+        }
+
+        /**
+         * Drops scheduled block updates queued by onBlockAdded (flowing liquids, falling blocks, fire, ...), so the
+         * scene stays as placed. Random ticks only run in chunks near players.
+         */
+        fun dropScheduledUpdates() {
+            dropTicks(world, (x0 - 1) shr 4, (z0 - 1) shr 4, (xMax + 1) shr 4, (zMax + 1) shr 4)
+        }
+
+        companion object {
+            fun prepare(world: WorldServer, x0: Int, y: Int, z0: Int, count: Int): Grid {
+                checkY(world, y)
+                checkY(world, y - 1)
+                val grid = Grid(world, x0, y, z0, count)
+                populate(world, (x0 shr 4) - 1, (z0 shr 4) - 1, grid.xMax shr 4, grid.zMax shr 4)
+                for (x in x0..grid.xMax) for (z in z0..grid.zMax) place(world, x, y - 1, z, Blocks.stone, 0)
+                return grid
+            }
+        }
+    }
+
+    /**
+     * Places the entries of a JSON list on a [Grid], in list order. Entries are `{"name": "modid:name", "meta": n}`
+     * (placed like zoo variants, any meta 0..65535 except 32767) or `{"mte": mID, "facing": f}` (placed like `bmh mte`;
+     * facing is a ForgeDirection ordinal or name, or a list of them of which the first valid one is used; default
+     * NORTH; ignored for pipes).
+     */
+    fun placeList(dim: Int, x0: Int, y: Int, z0: Int, file: String, out: String): JsonObject {
+        val world = world(dim)
+        val list = inFile(file).reader(StandardCharsets.UTF_8).use { JsonParser().parse(it) }
+        if (!list.isJsonArray) throw BmhException("$file must contain a JSON array")
+        val entries = list.asJsonArray.toList()
+        val grid = Grid.prepare(world, x0, y, z0, entries.size)
+        val placed = JsonArray()
+        val failed = JsonArray()
+        entries.forEachIndexed { index, element ->
+            val x = grid.x(index)
+            val z = grid.z(index)
+            val entry = element as? JsonObject
+            try {
+                if (entry == null) throw BmhException("entry is not a JSON object")
+                placed.add(placeEntry(world, x, y, z, entry).also { it.addProperty("index", index) })
+            } catch (t: Throwable) {
+                val reason = failure(t)
+                val record = JsonObject()
+                record.addProperty("index", index)
+                entry?.entrySet()?.forEach { (k, v) -> record.add(k, v) }
+                record.addProperty("reason", reason)
+                failed.add(record)
+                BmhMod.log.warn("place-list: failed to place {} at {},{},{}: {}", element, x, y, z, reason)
+                removeBroken(world, x, y, z)
+            }
+        }
+        grid.dropScheduledUpdates()
+        outFile(out).writeText(obj("placed" to placed, "failed" to failed).toString(), StandardCharsets.UTF_8)
+        return obj("file" to out, "placed" to placed.size(), "failed" to failed.size(), "box" to grid.box())
+    }
+
+    private fun placeEntry(world: WorldServer, x: Int, y: Int, z: Int, entry: JsonObject): JsonObject {
+        val mte = entry.get("mte")
+        if (mte != null) {
+            val mId = mte.asInt
+            val facings = when (val f = entry.get("facing")) {
+                null -> listOf(GtCompat.NORTH)
+                is JsonArray -> f.map { parseFacing(it.asString) }
+                else -> listOf(parseFacing(f.asString))
+            }
+            val result = GtCompat.placeMte(world, x, y, z, mId, facings)
+            val block = world.getBlock(x, y, z)
+            return obj(
+                "x" to x, "y" to y, "z" to z, "name" to blockName(block), "id" to Block.getIdFromBlock(block),
+                "meta" to world.getBlockMetadata(x, y, z), "mte" to mId, "metaName" to result.metaName,
+                "facing" to result.facing,
+            )
+        }
+        val name = entry.get("name")?.asString ?: throw BmhException("entry needs \"name\" or \"mte\"")
+        val meta = entry.get("meta")?.asInt ?: 0
+        checkMeta(meta)
+        val block = block(name)
+        val actual = placeVariant(world, x, y, z, block, meta)
+        return obj("x" to x, "y" to y, "z" to z, "name" to name, "id" to Block.getIdFromBlock(block), "meta" to actual)
+    }
+
+    /** ForgeDirection ordinal 0..5 or name (DOWN, UP, NORTH, SOUTH, WEST, EAST; case-insensitive). */
+    fun parseFacing(raw: String): Int {
+        raw.toIntOrNull()?.let { if (it in 0..5) return it }
+        val names = listOf("DOWN", "UP", "NORTH", "SOUTH", "WEST", "EAST")
+        val index = names.indexOf(raw.uppercase())
+        if (index < 0) throw BmhException("facing $raw is not a ForgeDirection ordinal 0..5 or name")
+        return index
     }
 
     /**

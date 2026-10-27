@@ -14,7 +14,8 @@ import java.util.concurrent.TimeoutException
  * caller blocks until it finishes.
  */
 object BmhCommand : CommandBase() {
-    private const val USAGE = "/bmh <ping|registry|set|fill|pregen|mte|multiblock|zoo|dump|flush> ..."
+    private const val USAGE = "/bmh <ping|registry|set|fill|pregen|hold|release|drop-ticks|mte|mtes|gt-ores|pipe|" +
+        "multiblock|zoo|place-list|dump|flush> ..."
     private const val TIMEOUT_MINUTES = 30L
 
     override fun getCommandName(): String = "bmh"
@@ -74,23 +75,56 @@ object BmhCommand : CommandBase() {
             val cx1 = a.int("cx1"); val cz1 = a.int("cz1"); val cx2 = a.int("cx2"); val cz2 = a.int("cz2")
             a.done { WorldOps.pregen(dim, cx1, cz1, cx2, cz2) }
         }
+        "hold" -> {
+            val dim = a.int("dim")
+            val cx1 = a.int("cx1"); val cz1 = a.int("cz1"); val cx2 = a.int("cx2"); val cz2 = a.int("cz2")
+            a.done { WorldOps.hold(dim, cx1, cz1, cx2, cz2) }
+        }
+        "release" -> a.done { WorldOps.release() }
+        "drop-ticks" -> {
+            val dim = a.int("dim")
+            val cx1 = a.int("cx1"); val cz1 = a.int("cz1"); val cx2 = a.int("cx2"); val cz2 = a.int("cz2")
+            a.done { WorldOps.dropTicksCommand(dim, cx1, cz1, cx2, cz2) }
+        }
         "mte" -> {
             val dim = a.int("dim")
             val x = a.int("x"); val y = a.int("y"); val z = a.int("z")
-            val mId = a.int("mID"); val facing = a.int("facing")
+            val mId = a.int("mID"); val facing = WorldOps.parseFacing(a.word("facing"))
             a.done { GtCompat.mte(dim, x, y, z, mId, facing) }
+        }
+        "mtes" -> {
+            val file = a.word("file")
+            a.done { GtCompat.mtes(file) }
+        }
+        "gt-ores" -> {
+            val file = a.word("file")
+            a.done { GtCompat.gtOres(file) }
+        }
+        "pipe" -> {
+            val dim = a.int("dim")
+            val x1 = a.int("x1"); val y1 = a.int("y1"); val z1 = a.int("z1")
+            val x2 = a.int("x2"); val y2 = a.int("y2"); val z2 = a.int("z2")
+            val mId = a.int("mID"); val color = a.optionalInt("color") ?: -1
+            a.done { GtCompat.pipe(dim, x1, y1, z1, x2, y2, z2, mId, color) }
         }
         "multiblock" -> {
             val dim = a.int("dim")
             val x = a.int("x"); val y = a.int("y"); val z = a.int("z")
             val tier = a.optionalInt("tier") ?: 1
-            a.done { GtCompat.multiblock(dim, x, y, z, tier) }
+            val mode = a.optionalWord() ?: "creative"
+            a.done { GtCompat.multiblock(dim, x, y, z, tier, mode) }
         }
         "zoo" -> {
             val dim = a.int("dim")
             val x = a.int("x"); val y = a.int("y"); val z = a.int("z")
             val modid = a.word("modid|all"); val file = a.word("file")
             a.done { WorldOps.zoo(dim, x, y, z, modid, file) }
+        }
+        "place-list" -> {
+            val dim = a.int("dim")
+            val x = a.int("x"); val y = a.int("y"); val z = a.int("z")
+            val file = a.word("file"); val out = a.word("out")
+            a.done { WorldOps.placeList(dim, x, y, z, file, out) }
         }
         "dump" -> {
             val dim = a.int("dim")

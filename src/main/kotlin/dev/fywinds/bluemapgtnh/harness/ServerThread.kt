@@ -8,8 +8,9 @@ import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 
 /**
- * Runs work on the server thread. 1.7.10's MinecraftServer has no task queue, and RCON commands execute on the RCON
- * thread, so tasks are queued here and drained at the start of every server tick.
+ * Runs work on the server thread. 1.7.10's MinecraftServer has no task queue, and vanilla runs RCON commands on the
+ * RCON thread, so off-thread tasks are queued here and drained at the start of every server tick. With GTNH's
+ * Hodgepodge `fixRconThreading` (pack default) RCON commands already run on the server thread and run inline.
  */
 object ServerThread {
     @Volatile

@@ -8,7 +8,7 @@ plugins {
 }
 
 // Git-based versioning is disabled (this project lives in a subdirectory of the BlueMap repo).
-val harnessVersion = "0.1.0"
+val harnessVersion = "0.2.0"
 extra["modVersion"] = harnessVersion
 version = harnessVersion
 
