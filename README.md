@@ -1,7 +1,20 @@
-# bmh — BlueMap GTNH test harness mod
+# harness: `bmh`, the BlueMap GTNH test harness mod
 
-Server-side Forge 1.7.10 mod (modId `bmh`, Kotlin) for GT New Horizons 2.9.0-RC-2. It adds the `/bmh` command, which
-the orchestrator in `../orchestrator` drives over RCON to build test scenes and dump world state. Not meant for players.
+> [!WARNING]
+> Unofficial: not affiliated with BlueMap or GT New Horizons. Vibe coded (written largely by an AI coding agent), no
+> quality guarantee, use at your own risk. See the
+> [umbrella repository](https://github.com/Bluemap-GTNH-Unofficial/BlueMap-GTNH) for details.
+
+Part of [Bluemap-GTNH-Unofficial/BlueMap-GTNH](https://github.com/Bluemap-GTNH-Unofficial/BlueMap-GTNH). Clone the
+umbrella with `git clone --recursive`. The mod builds on its own, but it is only useful together with its sibling
+checkouts (`orchestrator/` and the workspace folders next to it).
+
+A developer tool, not meant for players or production servers. `bmh` is a server-side Forge 1.7.10 mod (modId `bmh`,
+Kotlin) for GT New Horizons 2.9.0-RC-2 that adds the `/bmh` command. The orchestrator in `../orchestrator` drives it
+over RCON to build deterministic test scenes (block grids, GregTech machines, formed multiblocks) and to dump world
+state, which the world reader is checked against.
+
+![GregTech machines placed by bmh in the gt-machines test scene](https://raw.githubusercontent.com/Bluemap-GTNH-Unofficial/BlueMap-GTNH/main/docs/images/gt-machines.jpg)
 
 ## Build
 
@@ -10,7 +23,7 @@ Kotlin Gradle plugin forced to 2.3.21 in `settings.gradle.kts` (2.2.21 bundled w
 Kotlin `apiVersion`/`languageVersion` 2.1 because the runtime stdlib is Forgelin 2.0.3-GTNH's 2.1.10.
 
 ```bash
-cd BlueMap-GTNH/testing/harness-mod
+cd harness
 mise exec java@temurin-25.0.5+8.0.LTS -- ./gradlew \
   -Porg.gradle.java.installations.paths=$(mise where java@zulu-8.98.0.107)/Contents/Home,$(mise where java@temurin-25.0.5+8.0.LTS)/Contents/Home \
   build
@@ -133,8 +146,8 @@ one-block margin up to y+3, ready for `bmh dump`.
 
 `bmh te-nbt <dim> <x> <y> <z> <file>` reads `bmh-out/<file>`, merges it into the tile entity's `writeToNBT` output
 (`x`, `y`, `z`, `id` are always kept), calls `readFromNBT`, `markDirty`, marks the block for update, checks that the
-tile entity is still saveable (else the block is removed and the reply is `ERR`) and keeps a frozen tile entity frozen
-(D14). Reply: the resulting `writeToNBT` as JSON (lossy, as in `dump`). Some tile entities refuse `readFromNBT` while
+tile entity is still saveable (else the block is removed and the reply is `ERR`) and keeps a frozen tile entity frozen.
+Reply: the resulting `writeToNBT` as JSON (lossy, as in `dump`). Some tile entities refuse `readFromNBT` while
 live — AE2's cable bus throws `IllegalStateException: Loading data after part of a grid, this is invalid` (wrapped in
 an `InvocationTargetException` by its tile event dispatcher) — so when `readFromNBT` throws, the tile entity is
 replaced by a fresh one from the merged NBT (`TileEntity.createAndLoadEntity`, as a chunk load does) after the old
