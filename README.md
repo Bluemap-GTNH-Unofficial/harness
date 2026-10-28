@@ -58,7 +58,7 @@ and queued for unloading (thus saving) when the command ends.
 | `bmh mtes <file>` | `{"file","count","types":{<type>:n}}` | Every `GregTechAPI.METATILEENTITIES` entry. File: see "GregTech". |
 | `bmh gt-ores <file>` | `{"file","count","blocks"}` | Every GT ore block/meta GregTech generates. File: see "GregTech". |
 | `bmh te-nbt <dim> <x> <y> <z> <file>` | the tile entity's `writeToNBT` as JSON | Merges `bmh-out/<file>` (JSON patch, or SNBT if the name ends in `.snbt`) into the tile entity. See "Tile entity NBT". |
-| `bmh use <dim> <x> <y> <z> <side> <modid:item> <meta> [yaw] [count]` | `{"used","yaw","positions","placed"}` | Right-click with an item as a player. See "Use". |
+| `bmh use <dim> <x> <y> <z> <side> <modid:item> <meta> [yaw] [count] [--tag <file>]` | `{"used","yaw","positions","placed"}` | Right-click with an item (optionally with NBT) as a player. See "Use". |
 | `bmh pipe <dim> <x1> <y1> <z1> <x2> <y2> <z2> <mID> [color]` | `{"name","blocks","placed","connections"}` | Pipe/cable/frame MTE on an axis-aligned line (≤ 256 blocks), consecutive blocks connected. See "GregTech". |
 | `bmh multiblock <dim> <x> <y> <z> [tier] [creative\|survival\|check]` | `{"mode","formed"[,"errors"]}` + survival: `{"placed","passes","last"}` | Builds (or only checks) the multiblock of the controller at x/y/z. tier (default 1) = trigger stack size. See "GregTech". |
 | `bmh zoo <dim> <x> <y> <z> <modid\|all> <file>` | `{"file","placed","failed"}` | Grid with 2-block spacing on a stone slab at y-1, ordered by block id. File: `{"placed":[{"x","y","z","name","id","meta"}],"failed":[{"name","meta","reason"}]}`. See "Zoo" below. |
@@ -116,7 +116,7 @@ layout, population, stone floor at y-1 and dropped scheduled updates), entry *i*
 - `{"mte", "facing"}`: placed like `bmh mte`; `facing` is an ordinal/name or a list of them, the first one the
   machine accepts is used (default `NORTH`; ignored for pipes, which `bmh pipe` connects).
 - `{"use": u}` or `{"use": [u, ...]}`, `u = {"item": "modid:item", "meta": 0, "count": 1, "side": "UP", "yaw": <default>,
-  "at": [dx, dy, dz]}`: right-clicks like `bmh use`, in order; the clicked block is the cell plus `at` (default
+  "tag": <item NBT: JSON patch object or SNBT string>, "at": [dx, dy, dz]}`: right-clicks like `bmh use`, in order; the clicked block is the cell plus `at` (default
   `[0, -1, 0]`, the floor, so side `UP` places into the cell). Example (cable with an export bus on its north side):
   `{"use": [{"item": "appliedenergistics2:item.ItemMultiPart", "meta": 16},
   {"item": "appliedenergistics2:item.ItemMultiPart", "meta": 260, "side": "NORTH", "at": [0, 0, 0]}]}`. Resulting
@@ -134,14 +134,19 @@ one-block margin up to y+3, ready for `bmh dump`.
 `bmh te-nbt <dim> <x> <y> <z> <file>` reads `bmh-out/<file>`, merges it into the tile entity's `writeToNBT` output
 (`x`, `y`, `z`, `id` are always kept), calls `readFromNBT`, `markDirty`, marks the block for update, checks that the
 tile entity is still saveable (else the block is removed and the reply is `ERR`) and keeps a frozen tile entity frozen
-(D14). Reply: the resulting `writeToNBT` as JSON (lossy, as in `dump`).
+(D14). Reply: the resulting `writeToNBT` as JSON (lossy, as in `dump`). Some tile entities refuse `readFromNBT` while
+live — AE2's cable bus throws `IllegalStateException: Loading data after part of a grid, this is invalid` (wrapped in
+an `InvocationTargetException` by its tile event dispatcher) — so when `readFromNBT` throws, the tile entity is
+replaced by a fresh one from the merged NBT (`TileEntity.createAndLoadEntity`, as a chunk load does) after the old
+one is removed (logged at INFO). `ERR` replies for unexpected exceptions carry the cause chain (`A: msg <- B: msg`).
 
 - **SNBT** (file name ends in `.snbt`): 1.7.10 `JsonToNBT` syntax, e.g. `{facing:4b,Items:[{Slot:0b,id:264s,Count:5b,Damage:0s}]}`
   (`b` byte, `s` short, none int, `L` long, `f` float, `d` double; compounds merge recursively, other tags replace).
 - **JSON** (any other name): an object merged key by key. Value typing, first match wins:
   1. typed wrapper: `{"@byte": 1}`, `{"@short": 2}`, `{"@int": 3}`, `{"@long": 4}` (number or decimal string),
      `{"@float": 1.5}`, `{"@double": 1.5}`, `{"@string": "x"}`, `{"@bytes": [1, 2]}`, `{"@ints": [1, 2]}`,
-     `{"@list": [...]}`;
+     `{"@list": [...]}`; `{"@itemId": "modid:name"}` / `{"@blockId": "modid:name"}` → that item's / block's numeric
+     id in this world (int; also as an element of `@ints`/`@bytes`), so ids are never hard-coded;
   2. the type of the tag already at that key (numbers/booleans converted to it; arrays become a byte/int array, or a
      list whose elements take the existing list's element type);
   3. defaults: integral number → int (long if out of int range), other number → double, boolean → byte, string →
@@ -151,14 +156,17 @@ tile entity is still saveable (else the block is removed and the reply is `ERR`)
 
 ### Use
 
-`bmh use <dim> <x> <y> <z> <side> <modid:item> <meta> [yaw] [count]` right-clicks face `side` (ordinal or name) of
-block x/y/z the way the server handles a player's click: the fake player `[Minecraft]` stands 2 blocks out from that
-face (feet level with the block for horizontal faces), at `yaw` (Minecraft degrees: 0 = looking south/+z, 90 = west,
-180 = north, 270 = east; default: looking at the face) and pitch 0, holding `count` (default 1) × `item:meta` in slot
-0; then `Item.onItemUseFirst` and, if that did not handle it, `ItemStack.tryPlaceItemIntoWorld` (→ `Item.onItemUse`,
-with Forge's block snapshots and place event), hit point at the centre of the face. The clicked block's
-`onBlockActivated` is not called (as when sneaking). Placed tile entities are not frozen (they tick; mods such as AE2
-and EnderIO finish their NBT on the first ticks) and must be saveable.
+`bmh use <dim> <x> <y> <z> <side> <modid:item> <meta> [yaw] [count] [--tag <file>]` right-clicks face `side` (ordinal
+or name) of block x/y/z the way the server handles a player's click: the fake player `[Minecraft]` stands 2 blocks out
+from that face (feet level with the block for horizontal faces), at `yaw` (Minecraft degrees: 0 = looking south/+z,
+90 = west, 180 = north, 270 = east; default: looking at the face) and pitch 0, holding `count` (default 1) ×
+`item:meta` in slot 0, with the item NBT from `bmh-out/<file>` if `--tag` is given (SNBT if the name ends in `.snbt`,
+else a JSON patch typed as for `te-nbt`); then `Item.onItemUseFirst` and, if that did not handle it,
+`ItemStack.tryPlaceItemIntoWorld` (→ `Item.onItemUse`, with Forge's block snapshots and place event), hit point at the
+centre of the face. AE2 facades are not placed by `onItemUse`: AE2's client sends a `PacketPartPlacement` instead, so
+for an AE2 facade item the server side of that packet runs (`PartPlacement.facadeLogic` on the clicked block's part
+host, face `side`). The clicked block's `onBlockActivated` is not called (as when sneaking). Placed tile entities are
+not frozen (they tick; mods such as AE2 and EnderIO finish their NBT on the first ticks) and must be saveable.
 
 Reply: `{"used": bool, "yaw", "positions": [<clicked>, <adjacent>], "placed": <the adjacent record if it changed,
 else the clicked one if it changed, else null>}`; each record is `{"x","y","z","name","id","meta","te","role",
@@ -171,6 +179,7 @@ else the clicked one if it changed, else null>}`; each record is `{"x","y","z","
 | EnderIO item conduit | `use 0 102 4 106 UP EnderIO:itemItemConduit 0` (then x 103, 104) | `blockConduitBundle`; `connections` become two-sided after a tick |
 | Iron chest facing east | `use 0 106 4 102 UP IronChest:BlockIronChest 0 90` | `facing: 5` |
 | BiblioCraft bookcase facing south | `use 0 108 4 102 UP BiblioCraft:Bibliotheca 0 180` | `bookcaseAngle: 3` (yaw 0/90/180/270 → 1/2/3/0) |
+| AE2 stone facade on the cable's north side | `use 0 102 5 102 NORTH appliedenergistics2:item.ItemFacade 0 --tag facade.json`, `facade.json` = `{"x": {"@ints": [{"@itemId": "minecraft:stone"}, 0]}, "modid": "minecraft", "itemname": "stone"}` | clicked cable bus gains `facade:2` |
 
 ### GregTech
 

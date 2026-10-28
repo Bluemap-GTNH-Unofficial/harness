@@ -45,11 +45,16 @@ object BmhCommand : CommandBase() {
         error(e)
     } catch (t: Throwable) {
         BmhMod.log.error("bmh {} failed", args.joinToString(" "), t)
-        "ERR " + oneLine("${t.javaClass.simpleName}: ${t.message}")
+        "ERR " + oneLine(causeChain(t))
     } finally {
         FrozenTiles.commitPending()
         WorldOps.releaseChunks()
     }
+
+    /** `Type: message <- CauseType: message <- ...`, so wrapped exceptions (reflection, AE2 tile events) show their cause. */
+    private fun causeChain(t: Throwable): String =
+        generateSequence(t) { it.cause?.takeIf { cause -> cause !== it } }.take(8)
+            .joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message}" }
 
     private fun dispatch(a: Args): JsonObject = when (val sub = a.word("subcommand")) {
         "ping" -> a.done { WorldOps.ping() }
@@ -98,9 +103,21 @@ object BmhCommand : CommandBase() {
             val x = a.int("x"); val y = a.int("y"); val z = a.int("z")
             val side = WorldOps.parseFacing(a.word("side"))
             val item = a.word("modid:item"); val meta = a.int("meta")
-            val yaw = a.optionalWord()?.let { it.toFloatOrNull() ?: throw BmhException("<yaw> must be a number, got $it") }
-            val count = a.optionalInt("count") ?: 1
-            a.done { Interact.use(WorldOps.world(dim), x, y, z, side, item, meta, yaw, count) }
+            var yaw: Float? = null
+            var count = 1
+            var tag: String? = null
+            var numbers = 0
+            while (true) {
+                val word = a.optionalWord() ?: break
+                when {
+                    word == "--tag" -> tag = a.word("tag file")
+                    numbers == 0 -> yaw = word.toFloatOrNull() ?: throw BmhException("<yaw> must be a number, got $word")
+                    numbers == 1 -> count = word.toIntOrNull() ?: throw BmhException("<count> must be an integer, got $word")
+                    else -> throw BmhException("unexpected argument $word")
+                }
+                if (word != "--tag") numbers++
+            }
+            a.done { Interact.use(WorldOps.world(dim), x, y, z, side, item, meta, yaw, count, tag?.let(Interact::itemTagFile)) }
         }
         "mte" -> {
             val dim = a.int("dim")

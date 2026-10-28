@@ -4,6 +4,7 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonPrimitive
+import cpw.mods.fml.common.registry.GameData
 import net.minecraft.nbt.JsonToNBT
 import net.minecraft.nbt.NBTBase
 import net.minecraft.nbt.NBTTagByte
@@ -22,6 +23,8 @@ import net.minecraft.nbt.NBTTagString
  * Merges a patch into an NBT compound. JSON patches are typed as follows (see README "Tile entity NBT"):
  * - `{"@byte": 1}`, `@short`, `@int`, `@long` (number or decimal string), `@float`, `@double`, `@string`,
  *   `@bytes` / `@ints` (arrays), `@list` (list of patch values): explicit type;
+ * - `{"@itemId": "modid:name"}` / `{"@blockId": "modid:name"}`: the numeric item / block id of that registry name in
+ *   this world (an int; also accepted as an element of `@ints` / `@bytes`);
  * - otherwise the type of the tag already at that key (numbers and booleans are converted to it, arrays become a
  *   byte/int array or a list of the existing element type);
  * - otherwise: integral number -> int (long if out of int range), other number -> double, boolean -> byte,
@@ -98,12 +101,13 @@ object NbtPatch {
                 "@byte" -> NBTTagByte(v.asByte)
                 "@short" -> NBTTagShort(v.asShort)
                 "@int" -> NBTTagInt(v.asInt)
+                "@itemId", "@blockId" -> NBTTagInt(intOf(json))
                 "@long" -> NBTTagLong(v.asLong)
                 "@float" -> NBTTagFloat(v.asFloat)
                 "@double" -> NBTTagDouble(v.asDouble)
                 "@string" -> NBTTagString(v.asString)
-                "@bytes" -> NBTTagByteArray(v.asJsonArray.map { it.asByte }.toByteArray())
-                "@ints" -> NBTTagIntArray(v.asJsonArray.map { it.asInt }.toIntArray())
+                "@bytes" -> NBTTagByteArray(v.asJsonArray.map { intOf(it).toByte() }.toByteArray())
+                "@ints" -> NBTTagIntArray(v.asJsonArray.map { intOf(it) }.toIntArray())
                 "@list" -> array(v.asJsonArray, LIST, 0)
                 else -> throw BmhException("unknown NBT type $key")
             }
@@ -115,8 +119,8 @@ object NbtPatch {
     }
 
     private fun array(json: JsonArray, hint: Int, elementHint: Int): NBTBase = when (hint) {
-        BYTE_ARRAY -> NBTTagByteArray(json.map { it.asByte }.toByteArray())
-        INT_ARRAY -> NBTTagIntArray(json.map { it.asInt }.toIntArray())
+        BYTE_ARRAY -> NBTTagByteArray(json.map { intOf(it).toByte() }.toByteArray())
+        INT_ARRAY -> NBTTagIntArray(json.map { intOf(it) }.toIntArray())
         else -> NBTTagList().also { list ->
             for (element in json) {
                 val tag = if (elementHint != 0 && typed(element) == null) {
@@ -126,6 +130,26 @@ object NbtPatch {
                 }
                 list.appendTag(tag)
             }
+        }
+    }
+
+    /** A number, or `{"@itemId": "modid:name"}` / `{"@blockId": "modid:name"}` resolved through the FML registries. */
+    private fun intOf(json: JsonElement): Int {
+        if (!json.isJsonObject) return json.asInt
+        val (key, v) = json.asJsonObject.entrySet().singleOrNull() ?: throw BmhException("expected a number, got $json")
+        val name = v.asString
+        return when (key) {
+            "@itemId" -> {
+                val registry = GameData.getItemRegistry()
+                if (!registry.containsKey(name)) throw BmhException("unknown item $name")
+                registry.getId(name)
+            }
+            "@blockId" -> {
+                val registry = GameData.getBlockRegistry()
+                if (!registry.containsKey(name)) throw BmhException("unknown block $name")
+                registry.getId(name)
+            }
+            else -> throw BmhException("expected a number, @itemId or @blockId, got $json")
         }
     }
 

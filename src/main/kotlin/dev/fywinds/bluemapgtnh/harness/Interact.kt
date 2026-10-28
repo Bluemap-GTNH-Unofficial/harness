@@ -29,14 +29,34 @@ object Interact {
     }
 
     /**
+     * An item NBT tag from `bmh-out/<file>`: SNBT if the name ends in `.snbt`, else a JSON patch (same typing as
+     * `te-nbt`, e.g. `{"x": {"@ints": [{"@itemId": "minecraft:stone"}, 0]}}`) applied to an empty compound.
+     */
+    fun itemTagFile(file: String): NBTTagCompound {
+        val text = WorldOps.inFile(file).readText(StandardCharsets.UTF_8)
+        return itemTag(if (file.endsWith(".snbt")) com.google.gson.JsonPrimitive(text) else JsonParser().parse(text))
+    }
+
+    /** An item NBT tag from a JSON patch object or an SNBT string. */
+    fun itemTag(patch: JsonElement): NBTTagCompound = NBTTagCompound().also { tag ->
+        when {
+            patch.isJsonObject -> NbtPatch.merge(tag, patch.asJsonObject)
+            patch.isJsonPrimitive && patch.asJsonPrimitive.isString -> NbtPatch.mergeSnbt(tag, patch.asString)
+            else -> throw BmhException("item tag must be a JSON object or an SNBT string")
+        }
+    }
+
+    /**
      * Merges [patch] (a JSON object, see [NbtPatch], or a string holding SNBT) into the `writeToNBT` output of the tile
-     * entity at x/y/z, keeping its x/y/z/id, and loads the result with `readFromNBT`. The tile entity must stay
-     * saveable (else the block is removed and this throws); a frozen tile entity stays frozen. Returns the tile entity's
-     * `writeToNBT` output afterwards.
+     * entity at x/y/z, keeping its x/y/z/id, and loads the result with `readFromNBT`. Some tile entities refuse to
+     * re-read NBT while live (AE2's cable bus: "Loading data after part of a grid, this is invalid"); then the tile
+     * entity is replaced by a fresh one created from the merged NBT (`TileEntity.createAndLoadEntity`, as a chunk load
+     * does) after invalidating the old one. The tile entity must stay saveable (else the block is removed and this
+     * throws); a frozen tile entity stays frozen. Returns the tile entity's `writeToNBT` output afterwards.
      */
     fun applyTeNbt(world: WorldServer, x: Int, y: Int, z: Int, patch: JsonElement): NBTTagCompound {
         WorldOps.ensureChunk(world, x, z)
-        val te = world.getTileEntity(x, y, z) ?: throw BmhException("no tile entity at $x,$y,$z")
+        var te = world.getTileEntity(x, y, z) ?: throw BmhException("no tile entity at $x,$y,$z")
         val tag = NBTTagCompound().also { te.writeToNBT(it) }
         val kept = KEPT_KEYS.filter { tag.hasKey(it) }.associateWith { tag.getTag(it).copy() }
         when {
@@ -45,7 +65,16 @@ object Interact {
             else -> throw BmhException("NBT patch must be a JSON object or an SNBT string")
         }
         for ((key, value) in kept) tag.setTag(key, value)
-        te.readFromNBT(tag)
+        try {
+            te.readFromNBT(tag)
+        } catch (e: Exception) {
+            BmhMod.log.info("te-nbt: {} cannot re-read NBT in place, replacing it", te.javaClass.name, e)
+            val fresh = net.minecraft.tileentity.TileEntity.createAndLoadEntity(tag)
+                ?: throw BmhException("${te.javaClass.name} rejected the NBT and cannot be recreated from it: $e")
+            world.removeTileEntity(x, y, z)
+            world.setTileEntity(x, y, z, fresh)
+            te = fresh
+        }
         te.markDirty()
         world.markBlockForUpdate(x, y, z)
         WorldOps.checkSaveable(world, x, y, z)
@@ -58,10 +87,14 @@ object Interact {
      * player `[Minecraft]` stands two blocks out from that face (feet level with the block for horizontal faces), at
      * [yaw] (default: looking at the face) and pitch 0, holding the stack; `Item.onItemUseFirst`, then
      * `ItemStack.tryPlaceItemIntoWorld` (→ `Item.onItemUse`, with Forge's block snapshots and place event) with the
-     * hit at the centre of the face. The clicked block's own `onBlockActivated` is not called. Resulting tile entities
-     * are not frozen (they tick); they must be saveable.
+     * hit at the centre of the face. The clicked block's own `onBlockActivated` is not called. [tag] becomes the
+     * stack's NBT (e.g. an AE2 facade's `x`/`modid`/`itemname`). Resulting tile entities are not frozen (they tick);
+     * they must be saveable.
      */
-    fun use(world: WorldServer, x: Int, y: Int, z: Int, side: Int, itemName: String, meta: Int, yaw: Float?, count: Int): JsonObject {
+    fun use(
+        world: WorldServer, x: Int, y: Int, z: Int, side: Int, itemName: String, meta: Int, yaw: Float?, count: Int,
+        tag: NBTTagCompound? = null,
+    ): JsonObject {
         WorldOps.checkY(world, y)
         if (side !in 0..5) throw BmhException("side $side is not a ForgeDirection ordinal 0..5")
         if (count !in 1..64) throw BmhException("count $count outside 1..64")
@@ -85,7 +118,7 @@ object Interact {
         player.prevRotationYaw = angle
         player.prevRotationPitch = 0f
         player.isSneaking = false
-        val stack = ItemStack(item, count, meta)
+        val stack = ItemStack(item, count, meta).also { if (tag != null) it.tagCompound = tag }
         player.inventory.currentItem = 0
         player.inventory.setInventorySlotContents(0, stack)
         val hitX = 0.5f + 0.5f * dir.offsetX
@@ -93,7 +126,8 @@ object Interact {
         val hitZ = 0.5f + 0.5f * dir.offsetZ
         val used = try {
             item.onItemUseFirst(stack, player, world, x, y, z, side, hitX, hitY, hitZ) ||
-                stack.tryPlaceItemIntoWorld(player, world, x, y, z, side, hitX, hitY, hitZ)
+                stack.tryPlaceItemIntoWorld(player, world, x, y, z, side, hitX, hitY, hitZ) ||
+                Ae2Facades.place(stack, player, world, x, y, z, dir)
         } finally {
             player.inventory.setInventorySlotContents(0, null)
         }

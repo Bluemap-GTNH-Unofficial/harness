@@ -664,6 +664,7 @@ object WorldOps {
         val result = Interact.use(
             world, x + at[0], y + at[1], z + at[2], parseFacing(use.get("side")?.asString ?: "UP"), item,
             use.get("meta")?.asInt ?: 0, use.get("yaw")?.asFloat, use.get("count")?.asInt ?: 1,
+            use.get("tag")?.let(Interact::itemTag),
         )
         return result.get("used").asBoolean
     }
