@@ -30,6 +30,7 @@ object BmhMod {
     fun init(event: FMLInitializationEvent) {
         FMLCommonHandler.instance().bus().register(ServerThread)
         MinecraftForge.EVENT_BUS.register(FrozenTiles)
+        MinecraftForge.EVENT_BUS.register(ChunkLoads)
     }
 
     @Mod.EventHandler

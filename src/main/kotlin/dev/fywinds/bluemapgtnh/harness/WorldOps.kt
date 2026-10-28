@@ -6,6 +6,7 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.JsonPrimitive
 import cpw.mods.fml.common.registry.GameData
+import cpw.mods.fml.relauncher.ReflectionHelper
 import net.minecraft.block.Block
 import net.minecraft.init.Blocks
 import net.minecraft.inventory.IInventory
@@ -37,6 +38,9 @@ class BmhException(message: String) : RuntimeException(message)
 object WorldOps {
     const val FILL_CAP = 1_000_000L
     const val PREGEN_CAP = 4096L
+
+    /** Chunk-square side generated, populated, saved and unloaded at a time by `pregen`. */
+    private const val PREGEN_BATCH = 32
     const val OUT_DIR = "bmh-out"
     private const val DROP_PROBES = 32
 
@@ -327,8 +331,123 @@ object WorldOps {
         val (za, zb) = min(cz1, cz2) to max(cz1, cz2)
         val count = (xb - xa + 1).toLong() * (zb - za + 1)
         if (count > PREGEN_CAP) throw BmhException("pregen of $count chunks exceeds $PREGEN_CAP")
-        populate(world, xa, za, xb, zb)
-        return obj("chunks" to count, "ms" to (System.nanoTime() - start) / 1_000_000)
+        val provider = world.theChunkProviderServer
+        val before = provider.loadedChunkCount
+        var deferred = 0
+        ChunkLoads.start(world)
+        try {
+            for (bx in xa..xb step PREGEN_BATCH) for (bz in za..zb step PREGEN_BATCH) {
+                populate(world, bx, bz, min(bx + PREGEN_BATCH - 1, xb), min(bz + PREGEN_BATCH - 1, zb))
+                deferred += unloadNow(world)
+            }
+        } finally {
+            ChunkLoads.stop()
+        }
+        return obj(
+            "chunks" to count, "ms" to (System.nanoTime() - start) / 1_000_000,
+            "loadedBefore" to before, "loadedAfter" to provider.loadedChunkCount, "deferredTasks" to deferred,
+        )
+    }
+
+    /**
+     * Saves and unloads, right now, every chunk loaded since the last call (by the harness, world generation or mods'
+     * deferred generation; held chunks excepted; spawn chunks stay, as vanilla keeps them), instead of leaving them to
+     * the unload queue, which is drained at ≤ 100 chunks per tick: a large pregen otherwise leaves tens of thousands
+     * of chunks loaded. Before unloading, generation that mods defer to the next ticks ([ChunkLoads.runDeferredGeneration])
+     * and pending Phosphor light updates run, since both would reload the chunks right after; this repeats until
+     * nothing new was loaded. GTNH's Hodgepodge (throttleChunkGeneration) protects freshly generated chunks and their
+     * neighbours from unloading for 600 ticks, so they are taken off its list first (they are populated by now).
+     * Scheduled block updates of unloaded chunks were saved with them and are dropped from the world, which would
+     * otherwise keep (and re-schedule every tick) them. Waits for the chunk IO thread, so writes do not pile up.
+     * Returns the number of deferred generation tasks run.
+     */
+    private fun unloadNow(world: WorldServer): Int {
+        loadedByCommand.remove(world)
+        val provider = world.theChunkProviderServer
+        val keep = held[world].orEmpty()
+        var deferred = 0
+        for (round in 0 until 16) {
+            val ran = ChunkLoads.runDeferredGeneration(world)
+            deferred += ran
+            processLightUpdates(world)
+            val keys = ChunkLoads.drain().filter { it !in keep }
+            if (keys.isEmpty() && ran == 0) break
+            val chunks = keys.map { (it shr 32).toInt() to it.toInt() }
+                .filter { (cx, cz) -> provider.chunkExists(cx, cz) }
+                .map { (cx, cz) -> provider.provideChunk(cx, cz) }
+            HodgepodgeChunkGen.forget(world.provider.dimensionId, chunks)
+            for (chunk in chunks) provider.unloadChunksIfNotNearSpawn(chunk.xPosition, chunk.zPosition)
+            while (true) {
+                val loaded = provider.loadedChunkCount
+                provider.unloadQueuedChunks()
+                if (provider.loadedChunkCount >= loaded) break
+            }
+            for (chunk in chunks) {
+                if (!provider.chunkExists(chunk.xPosition, chunk.zPosition)) world.getPendingBlockUpdates(chunk, true)
+            }
+        }
+        ThreadedFileIOBase.threadedIOInstance.waitForFinish()
+        return deferred
+    }
+
+    /**
+     * ArchaicFix's Phosphor lighting engine queues light updates and runs them on the next tick, loading every chunk
+     * they touch again; run them now, while the chunks are still loaded. No-op without ArchaicFix.
+     */
+    private fun processLightUpdates(world: WorldServer) {
+        val engine = lightingEngine?.invoke(world) ?: return
+        engine.javaClass.getMethod("processLightUpdates").invoke(engine)
+    }
+
+    private val lightingEngine by lazy {
+        runCatching {
+            Class.forName("org.embeddedt.archaicfix.lighting.api.ILightingEngineProvider").getMethod("getLightingEngine")
+        }.getOrNull()
+    }
+
+    /** Optional access to Hodgepodge's chunk generation scheduler (absent outside GTNH). */
+    private object HodgepodgeChunkGen {
+        private val api = runCatching {
+            val scheduler = Class.forName("com.mitchej123.hodgepodge.mixins.hooks.ChunkGenScheduler")
+            Triple(
+                scheduler.getMethod("forDimension", Int::class.javaPrimitiveType),
+                scheduler.getMethod("onChunkUnload", Long::class.javaPrimitiveType),
+                Class.forName("com.mitchej123.hodgepodge.util.ChunkPosUtil")
+                    .getMethod("toLong", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType),
+            )
+        }.getOrNull()
+
+        /** Drops the scheduler's state (unpopulated-terrain tracking, unload protection) for these chunks. */
+        fun forget(dim: Int, chunks: List<Chunk>) {
+            val (forDimension, onChunkUnload, toLong) = api ?: return
+            val scheduler = forDimension.invoke(null, dim)
+            for (chunk in chunks) onChunkUnload.invoke(scheduler, toLong.invoke(null, chunk.xPosition, chunk.zPosition))
+        }
+    }
+
+    private val pendingTicks by lazy {
+        ReflectionHelper.findField(WorldServer::class.java, "pendingTickListEntriesTreeSet", "field_73065_O")
+    }
+
+    /** Server load: mean tick time over the last 100 ticks, and per loaded world chunks, entities, ticks. */
+    fun stats(): JsonObject {
+        val server = MinecraftServer.getServer()
+        val tickMs = server.tickTimeArray.average() / 1_000_000
+        val worlds = JsonArray()
+        for (world in DimensionManager.getWorlds().sortedBy { it.provider.dimensionId }) {
+            val dim = world.provider.dimensionId
+            worlds.add(
+                obj(
+                    "dim" to dim,
+                    "chunks" to world.theChunkProviderServer.loadedChunkCount,
+                    "entities" to world.loadedEntityList.size,
+                    "tileEntities" to world.loadedTileEntityList.size,
+                    "pendingTicks" to runCatching { (pendingTicks.get(world) as Collection<*>).size }.getOrNull(),
+                    "tickMs" to server.worldTickTimes[dim]?.average()?.div(1_000_000),
+                ),
+            )
+        }
+        return obj("tickMs" to tickMs, "tps" to min(20.0, 1000.0 / max(tickMs, 1e-3)), "worlds" to worlds)
     }
 
     private fun populate(world: WorldServer, xa: Int, za: Int, xb: Int, zb: Int) {

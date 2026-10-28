@@ -14,8 +14,8 @@ import java.util.concurrent.TimeoutException
  * caller blocks until it finishes.
  */
 object BmhCommand : CommandBase() {
-    private const val USAGE = "/bmh <ping|registry|set|fill|pregen|hold|release|drop-ticks|mte|mtes|gt-ores|pipe|" +
-        "multiblock|zoo|place-list|te-nbt|use|dump|flush> ..."
+    private const val USAGE = "/bmh <ping|stats|registry|set|fill|pregen|hold|release|drop-ticks|mte|mtes|gt-ores|" +
+        "pipe|multiblock|zoo|place-list|te-nbt|use|dump|flush> ..."
     private const val TIMEOUT_MINUTES = 30L
 
     override fun getCommandName(): String = "bmh"
@@ -53,6 +53,7 @@ object BmhCommand : CommandBase() {
 
     private fun dispatch(a: Args): JsonObject = when (val sub = a.word("subcommand")) {
         "ping" -> a.done { WorldOps.ping() }
+        "stats" -> a.done { WorldOps.stats() }
         "registry" -> {
             val file = a.word("file")
             a.done { WorldOps.registry(file) }
