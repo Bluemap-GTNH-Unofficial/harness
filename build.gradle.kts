@@ -7,7 +7,7 @@ plugins {
     id("org.jetbrains.kotlin.jvm")
 }
 
-// Git-based versioning is disabled (this project lives in a subdirectory of the BlueMap repo).
+// Fixed version instead of GTNHGradle's git-based versioning.
 val harnessVersion = "0.3.0"
 extra["modVersion"] = harnessVersion
 version = harnessVersion
