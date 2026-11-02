@@ -14,8 +14,6 @@ Kotlin) for GT New Horizons 2.9.0-RC-2 that adds the `/bmh` command. The orchest
 over RCON to build deterministic test scenes (block grids, GregTech machines, formed multiblocks) and to dump world
 state, which the world reader is checked against.
 
-![GregTech machines placed by bmh in the gt-machines test scene](https://raw.githubusercontent.com/Bluemap-GTNH-Unofficial/BlueMap-GTNH/main/docs/images/gt-machines.jpg)
-
 ## Build
 
 GTNHGradle (ExampleMod1.7.10 layout), `enableModernJavaSyntax = modern` (Java 25 bytecode, no downgrading),
@@ -67,6 +65,7 @@ and queued for unloading (thus saving) when the command ends.
 | `bmh hold <dim> <cx1> <cz1> <cx2> <cz2>` | `{"chunks","held"}` | Loads (generates) the inclusive chunk rectangle (≤ 4096) and keeps it loaded until `release`, so tile entities there tick and settle and a later `dump` reads exactly what `flush` saved. Without it, a dump that has to load chunks queues them for unloading afterwards (vanilla unloads ≤ 100 per tick), and tile entities ticking meanwhile can change what gets saved. `held` = total held chunks. |
 | `bmh release` | `{"chunks"}` | Queues every held chunk for unloading. |
 | `bmh drop-ticks <dim> <cx1> <cz1> <cx2> <cz2>` | `{"chunks","ticks"}` | Removes the scheduled block updates of the inclusive chunk rectangle (≤ 4096), so liquids stop flowing and a held area no longer changes between `flush`, `dump` and the final save. |
+| `bmh random-ticks <on\|off>` | `{"randomTicks","blocks"}` | 1.7.10 has no `randomTickSpeed` gamerule: `off` clears `Block.needsRandomTick` on every registered block that has it (`blocks` = how many), so nothing is random-ticked (no grass spread, crop growth, leaf decay, melting, or mod soil updates); `on` restores exactly those blocks. Runtime only, a restart starts with random ticks on. Blocks set while off are ref-counted per chunk section against the cleared flag, so after `on` such sections may tick wrongly until reloaded. |
 | `bmh mte <dim> <x> <y> <z> <mID> <facing>` | `{"name"}` | Places `gt.blockmachines` with MetaTileEntity `mID` (e.g. 1000 = EBF controller) like a player would (see "GregTech"); `ERR` if the facing is invalid for that machine. `name` = metaName. |
 | `bmh mtes <file>` | `{"file","count","types":{<type>:n}}` | Every `GregTechAPI.METATILEENTITIES` entry. File: see "GregTech". |
 | `bmh gt-ores <file>` | `{"file","count","blocks"}` | Every GT ore block/meta GregTech generates. File: see "GregTech". |

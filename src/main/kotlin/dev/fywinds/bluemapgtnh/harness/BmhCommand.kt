@@ -14,8 +14,8 @@ import java.util.concurrent.TimeoutException
  * caller blocks until it finishes.
  */
 object BmhCommand : CommandBase() {
-    private const val USAGE = "/bmh <ping|stats|registry|set|fill|pregen|hold|release|drop-ticks|mte|mtes|gt-ores|" +
-        "pipe|multiblock|zoo|place-list|te-nbt|use|dump|flush> ..."
+    private const val USAGE = "/bmh <ping|stats|registry|set|fill|pregen|hold|release|drop-ticks|random-ticks|mte|" +
+        "mtes|gt-ores|pipe|multiblock|zoo|place-list|te-nbt|use|dump|flush> ..."
     private const val TIMEOUT_MINUTES = 30L
 
     override fun getCommandName(): String = "bmh"
@@ -91,6 +91,14 @@ object BmhCommand : CommandBase() {
             val dim = a.int("dim")
             val cx1 = a.int("cx1"); val cz1 = a.int("cz1"); val cx2 = a.int("cx2"); val cz2 = a.int("cz2")
             a.done { WorldOps.dropTicksCommand(dim, cx1, cz1, cx2, cz2) }
+        }
+        "random-ticks" -> {
+            val enabled = when (val state = a.word("on|off")) {
+                "on" -> true
+                "off" -> false
+                else -> throw BmhException("<on|off> expected, got $state")
+            }
+            a.done { RandomTicks.set(enabled) }
         }
         "te-nbt" -> {
             val dim = a.int("dim")
