@@ -27,7 +27,10 @@ mise exec java@temurin-25.0.5+8.0.LTS -- ./gradlew \
   build
 ```
 
-The first build decompiles Minecraft (`setupDecompWorkspace`, ~12 min); later builds take seconds.
+The first build on a machine decompiles Minecraft (`setupDecompWorkspace`, ~12 min); RetroFuturaGradle keeps the result
+in the Gradle user home, where the server mod and exporter builds reuse it, and the local build cache
+(`org.gradle.caching`) shares the recompiled Minecraft. Later builds take seconds. In the umbrella workspace,
+`mise run build-harness` builds the jar and installs it into the 2.9.0 servers' `mods/`.
 
 Output (reobfuscated, the one to install): `build/libs/bmh-<version>.jar`. `bmh-<version>-dev.jar` is the deobfuscated
 dev jar.
