@@ -10,9 +10,9 @@ umbrella with `git clone --recursive`. The mod builds on its own, but it is only
 checkouts (`orchestrator/` and the workspace folders next to it).
 
 A developer tool, not meant for players or production servers. `bmh` is a server-side Forge 1.7.10 mod (modId `bmh`,
-Kotlin) for GT New Horizons 2.9.0-RC-2 that adds the `/bmh` command. The orchestrator in `../orchestrator` drives it
-over RCON to build deterministic test scenes (block grids, GregTech machines, formed multiblocks) and to dump world
-state, which the world reader is checked against.
+Kotlin) for GT New Horizons 2.9.0 (the same jar runs on 2.9.0-RC-2) that adds the `/bmh` command. The orchestrator in
+`../orchestrator` drives it over RCON to build deterministic test scenes (block grids, GregTech machines, formed
+multiblocks) and to dump world state, which the world reader is checked against.
 
 ## Build
 
