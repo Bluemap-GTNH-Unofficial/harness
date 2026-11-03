@@ -10,7 +10,7 @@ umbrella with `git clone --recursive`. The mod builds on its own, but it is only
 checkouts (`orchestrator/` and the workspace folders next to it).
 
 A developer tool, not meant for players or production servers. `bmh` is a server-side Forge 1.7.10 mod (modId `bmh`,
-Kotlin) for GT New Horizons 2.9.0 (the same jar runs on 2.9.0-RC-2) that adds the `/bmh` command. The orchestrator in
+Kotlin) for GT New Horizons 2.9.0 that adds the `/bmh` command. The orchestrator in
 `../orchestrator` drives it over RCON to build deterministic test scenes (block grids, GregTech machines, formed
 multiblocks) and to dump world state, which the world reader is checked against.
 
@@ -65,7 +65,7 @@ and queued for unloading (thus saving) when the command ends.
 | `bmh hold <dim> <cx1> <cz1> <cx2> <cz2>` | `{"chunks","held"}` | Loads (generates) the inclusive chunk rectangle (≤ 4096) and keeps it loaded until `release`, so tile entities there tick and settle and a later `dump` reads exactly what `flush` saved. Without it, a dump that has to load chunks queues them for unloading afterwards (vanilla unloads ≤ 100 per tick), and tile entities ticking meanwhile can change what gets saved. `held` = total held chunks. |
 | `bmh release` | `{"chunks"}` | Queues every held chunk for unloading. |
 | `bmh drop-ticks <dim> <cx1> <cz1> <cx2> <cz2>` | `{"chunks","ticks"}` | Removes the scheduled block updates of the inclusive chunk rectangle (≤ 4096), so liquids stop flowing and a held area no longer changes between `flush`, `dump` and the final save. |
-| `bmh random-ticks <on\|off>` | `{"randomTicks","blocks"}` | 1.7.10 has no `randomTickSpeed` gamerule: `off` clears `Block.needsRandomTick` on every registered block that has it (`blocks` = how many), so nothing is random-ticked (no grass spread, crop growth, leaf decay, melting, or mod soil updates); `on` restores exactly those blocks. Runtime only, a restart starts with random ticks on. Blocks set while off are ref-counted per chunk section against the cleared flag, so after `on` such sections may tick wrongly until reloaded. |
+| `bmh random-ticks <on\|off>` | `{"randomTicks","blocks"}` | 1.7.10 has no `randomTickSpeed` gamerule: `off` clears `Block.needsRandomTick` on every registered block that has it, so nothing is random-ticked (no grass spread, crop growth, leaf decay, melting, or mod soil updates); `on` restores exactly those blocks. `blocks` = how many blocks have the flag cleared now (0 after `on`). Runtime only, a restart starts with random ticks on. Blocks set while off are ref-counted per chunk section against the cleared flag, so after `on` such sections may tick wrongly until reloaded. The world-scene client oracle (`gtnh-client cameras`, run by `e2e oracle world`) turns random ticks off before the client joins, so the scene stays as dumped while the player is near it; with `--running-server` it turns them on again at the end. |
 | `bmh mte <dim> <x> <y> <z> <mID> <facing>` | `{"name"}` | Places `gt.blockmachines` with MetaTileEntity `mID` (e.g. 1000 = EBF controller) like a player would (see "GregTech"); `ERR` if the facing is invalid for that machine. `name` = metaName. |
 | `bmh mtes <file>` | `{"file","count","types":{<type>:n}}` | Every `GregTechAPI.METATILEENTITIES` entry. File: see "GregTech". |
 | `bmh gt-ores <file>` | `{"file","count","blocks"}` | Every GT ore block/meta GregTech generates. File: see "GregTech". |
@@ -103,7 +103,7 @@ can still change tile entity NBT or block meta after a reload.
   robot map) and unsupported metas crash there. A block that throws, does not stay in place, or has an unsaveable
   tile entity is removed and listed under `failed` with the reason.
 - **After placing:** scheduled block updates in the grid's chunks are dropped (no flowing liquids, falling blocks,
-  fire spread). Random ticks only happen near players.
+  fire spread). Random ticks only happen near players (`random-ticks off` stops them).
 - **Determinism:** two fresh worlds give identical manifests and identical blocks/metas in the zoo cells; tile entity
   NBT can still differ by mod-generated random ids. The default `FLAT` preset (`2;7,2x3,2;1;village`) generates
   villages whose layout differs between fresh worlds; they sit between the zoo cells unless the preset omits
@@ -182,7 +182,8 @@ not frozen (they tick; mods such as AE2 and EnderIO finish their NBT on the firs
 
 Reply: `{"used": bool, "yaw", "positions": [<clicked>, <adjacent>], "placed": <the adjacent record if it changed,
 else the clicked one if it changed, else null>}`; each record is `{"x","y","z","name","id","meta","te","role",
-"changed"}` with `te` the tile entity NBT as JSON. Verified on GTNH 2.9.0-RC-2 (block facing = towards the player):
+"changed"}` with `te` the tile entity NBT as JSON. Verified on GTNH 2.9.0, where the `mod-renderers` scene places
+these items this way (block facing = towards the player):
 
 | Item | Example | Result |
 |---|---|---|
