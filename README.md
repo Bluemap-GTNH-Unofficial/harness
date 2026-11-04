@@ -27,6 +27,9 @@ mise exec java@temurin-25.0.5+8.0.LTS -- ./gradlew \
   build
 ```
 
+(On Linux drop `/Contents/Home`: the installation paths are the `mise where` directories, with `/Contents/Home`
+appended only on macOS. In the umbrella workspace `../pipeline/gradlew` does this.)
+
 The first build on a machine decompiles Minecraft (`setupDecompWorkspace`, ~12 min); RetroFuturaGradle keeps the result
 in the Gradle user home, where the server mod and exporter builds reuse it, and the local build cache
 (`org.gradle.caching`) shares the recompiled Minecraft. Later builds take seconds. In the umbrella workspace,
